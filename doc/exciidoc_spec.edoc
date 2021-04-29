@@ -1,0 +1,2611 @@
+!= Exciidoc
+!== lightweight EXtendable asCII DOCument markup
+!=== Lex Trotman <exciidoc@gmail.com>
+!==== :apache-2.0:
+
+= Introduction
+
+Why another document markup, AsciiDoc, reST, Markdown?  These all have good points, and Exciidoc leans heavily on their precedents, but...
+
+Exciidoc is well defined from the start, not grown over time (unlike AsciiDoc), so hopefully will keep implementations consistent (unlike Markdown). Like AsciiDoc, Exciidoc is focussed on documents where HTML is but one output format (unlike Markdown), but isn't as heavily language focussed as reST which has a Python focus.  Exciidoc mixes the best syntaxes (IMNSHO) of AsciiDoc and Markdown.
+
+This document specifies the Exciidoc language as it maps to a document tree and the intended semantics of those entities in the resulting document output so that consistency between output formats is possible.
+
+Display of output can of course be variable, the same HTML may look very different with different CSS, and paper documents (PDF) have differing needs from online display, so the intended semantics of the entities are defined but cannot be required.
+
+Formal syntax specifications are described in a Parsing Expression Grammar (PEG) whose syntax and semantics is defined in <<Peg Notation>>.
+
+!!!note
+The "lightweight" in the subtitle originally contributed the "L" to the acronym, but that made my name part of the project name, so it was removed to protect the guilty.
+!!!
+
+= Implementations
+
+TODO cl 
+TODO warnings and errors
+
+= Markup Basics
+
+An Exciidoc document consists of a sequence of code points encoding a sequence of markups and plain text.
+
+This sequence of markups and text is a flat encoding of a tree structure of document entities with properties and zero or more child entities. 
+
+Entities have types which define the properties they have and the types of entities that are allowed as children.  Entity types are also grouped into classes for easy identification of common syntaxes and behaviours.  An entity type may be part of more than one class.
+
+Markups are identified by markers which are defined sequences of code points and context. The marker sequences all contain ASCII punctuation code points or spacing code points.  
+
+There are two types of markups:
+
+:entity markups: that map to entities in the resulting document, and 
+:control markups: that control document content, control parsing, or control the operation of the converter, but which do not themselves map to an entity
+
+Entity markups preceed the definition of the entity's children. The children of an entity are zero or more entities that follow its markup group until either:
+
+* if the entity is not a delimited entity, until but not including the next entity that is not allowed as its child, or
+* if the entity is a delimited entity, until the closing delimiter marker is encountered
+
+Delimited entities make it easier to be deterministic about parsing of the contents and to keep them grouped, but undelimited entities have more "human" syntax in some cases.
+
+All markup has the same general syntax:
+
+* one or more optional parameter lists
+* optional title
+* primary marker
+* optional value and end marker
+
+The primary marker defines the allowed entity and the markup syntax:
+
+* the number of parameter lists allowed/required, 
+* if a title is allowed, 
+* and if a value is allowed and if so what its syntax is and what the end marker code point sequence is.  
+
+Sequences of code points that are between markups are converted to `Text` entities in the document tree.
+
+== Parameter Lists
+
+Parameter list map values to names.  Some of these map to properties of the entity, but some have other purposes so the term parameter is used instead of property or attribute.
+
+Mapping is accomplished by three methods:
+
+* tags
+* position
+* name
+
+=== Syntax
+
+The syntax of a parameter list is:
+
+```
+name: [a-zA-Z]?(+[a-zA-Z0-9_][a-zA-Z0-9] / [a-zA-Z0-9])
+hex: [0-9a-fA-F]
+alpha_escape: [elnprtw] / "x" hex hex / "u" {4}hex /"U" {6}hex) l == crlf
+value: ["] *( -[\\":L:] / "\\" (["\\:L:] / alpha_escape ) ["]
+      / +( -[\\:L:,\];] / "\\" ([\\:L:,\];] / alpha_escape) )
+tagged_parameter: [#.+-&!] name / "[" *( -[:L:\]\\] / "\\" -[] ) "]"
+named_parameter: name "=" value
+parameter: named_parameter *( sp "," sp named_parameter ) / value
+sp: *([:W:] / "\\"[:L:])
+parameter_list: "[" sp ?( +tagged_parameter sp "," ) ?( sp parameter *(sp "," sp parameter) ) 
+                ?( sp ";" sp named_parameter *(sp "," sp named_parameter) ) sp "]"
+```
+
+Notes:
+
+* in accordance with the syntax, `name` cannot end in underscore, names are used for IDs and selectors which are also internally generated, and all internally generated ones end in underscore to ensure they do not clash with user specified ones.
+
+* the single letter escapes are tab and all line ends:
++
+|====
+| Letter | Meaning
+| e      | NEL `x85`
+| l      | LS `u2028`
+| n      | newline `x0a`
+| p      | PS `u2029`
+| r      | return `x0d`
+| t      | tab `x09`
+| w      | windows line `\r\n`
+|====
+
+* parameter lists cannot contain un-escaped line ends, escaped line ends are ignored outside and removed from values, to include a line end in a value use the alphabetic escape above.  This reduces the risk of a missing `]` consuming the rest of the document.
+
+* tags mean:
++
+|====
+| Char | Meaning
+| #    | Use `name` as the ID property for the entity
+| [ ]  | Use text between `[]` as the reference text for cross references
+| .    | Add `name` as a selector property for the entity
+| +    | Set `name` boolean option "on"
+| -    | Set `name` boolean option "off"
+| &    | Include parsing of `name` markup or group in the entity content
+| !    | Exclude parsing of `name` markup or group in the entity content
+|====
++
+Some entities generate automatic reference text from their value or content, or the title if its specified, explicit reference text specified in the tag overrides automatic which overrides title
+
+* the syntax for `parameter` means that once one named parameter is encountered no more un-named values are allowed.
+
+=== Semantics
+
+The parameter names and their uses are specified for each markup in the sections below. The parameter list maps to these as follows:
+
+* tagged parameters map directly to the specified parameter
+
+* up to the first `named_parameter` or a `;` values map to parameters in order, after that all values must be named and map to the parameter of the specified name
+
+* it is an error if:
+** there are more values than parameters for the entity
+** a name used for a parameter does not match one defined for the entity
+** a parameter maps to more than one value (same name, or positional and name)
++-
+These rules minimise the risk of accidental mis-mapping due to human mis-typing of names or mis-counting positions
+
+* after the `;` the parameters are treated as named values (see ...) that are defined only for the scope of the entity and override existing named values (body or document) for that scope.
+
+== Titles
+
+The syntax of titles is:
+
+```
+title: [:L:]"." -[:S:] *-[:L:] &[:L:]
+```
+
+The code points between the `.` at the start of the line and the end of the line is treated as inline markup text (see <<iline_markup>>).  It is parsed after the markup is recognised.
+
+== Primary Markers
+
+Primary markers always contain ASCII punctuation code points, but can contain any other code points and contexts (following/followed by).
+
+The primary marker sequences are chosen to be less likely to occur in common document text, but as anything can occur on occasion in human text, any markup sequence can be treated as text ("escaped" from being a marker) by preceeding the first punctuation or spacing code point in the sequence with a backslash.  A corollory is, to include a backslash without escaping a following marker, preceed it with a backslash.  One backslash escapes the whole marker.  A backslash preceeding a non-marker sequence has no meaning and is removed from the document so extra "escapes" are harmless and only double backslashes are kept.
+
+=== Classes
+
+All entities are one of the two major classes, block or inline.  The primary markers for blocks are almost all line context anchored (ie they follow, and/or contain, and/or preceed a line begin/end), whilst those for inline entities are not.  Therefore only line context anchored block markups can contain titles because they have line context and the line end must be part of the following primary marker.
+
+Only table cell markups are block but not line context anchored.
+
+== Values
+
+Markup values have differing meanings for different markups, they are not necessarily normal or marked up text.  Each markup defines the syntax and semantics of its values.
+
+End markers are only recognised when they follow a markup value for the associated primary marker, otherwise they are plain text. In some cases end markers are contextual and are not included in the markup. 
+
+= Top Level Document Structure
+
+The top level document structure is in three parts:
+
+* a header containing frontmatter and metadata,
+* a prelude providing introductory material, and
+* a sequence of section entities forming the document body.
+
+The header allows defining named values that apply to the whole document.  There is some convenience markups that translate common header defines title, subtitle, authors and revision.  Includes allow loading values from other files.  Backends define which named values they use and how they are interpreted.  The header finishes when any markup not allowed is encountered.  Blank lines are allowed in the header.
+
+All parts are optional, but obviously at least one of the prelude or section parts must be present to have a non-trivial document.  
+
+Control markups and inline markups are allowed in all three parts of the document.  Which block markups are allowed and the entity they represent varies between parts (see ...)
+
+= Control Markups
+
+The control markups are:
+
+* encoding - identify a file with non-UTF-8 encoding
+* includes - textual inclusion, inline and block
+* imports - parsed sub document inclusion, inline and block
+* defines - define values that can be included (like document internal importables), block and inline
+* substitutes - import defined values, block and inline
+* parsing controls - modify parsing operation
+
+== Encoding
+
+The default encoding for an Exciidoc file is UTF-8, the encoding markup identifies alternate encoding is used for the file.  The encoding must read in ASCII bytes regardless of the encoding of the rest of the file.
+
+.Markup Classes
+Block
+
+.Syntax
+```
+"encoding::" +-[:L:] &[:L:] / BOM
+BOM: TODO BOM values
+```
+
+.Parameters
+None
+
+.Title
+No
+
+.Value
+For the "encoding::" syntax the bytes between the is the name of an encoding.
+
+.Semantics
+The primary marker must occupy the first bytes in the file.  If an implementation accepts the specified encoding it ignores the encoding markup and either converts the file to UTF-8 or processes its contents as a Unicode sequence.
+
+Byte Order Mark (BOM) values mean:
+
+|====
+| TODO table here
+|====
+
+== Includes
+
+Includes incorporate the plain textual content of another file in place of the markup.
+
+.Markup Classes
+Block, Inline
+
+.Syntax
+Both block and inline versions are available
+
+
+```
+block_include: ?parameter_list [:L:]"include::" +-[:L:] &[:L:]
+inline_include: ?parameter_list "include:" +( -[:W:\\] / "\\" [:W:\\] ) &[:S:]
+```
+
+The markup value is the sequence of code points after the last colon up to but not including the terminating spacing.  Inline includes can have word spacing or a backslash included in the value by escaping with a backslash which will be removed from the value.  Block includes accept word spacing in the value without escaping.
+
+.Parameters
+```
+[encoding=UTF-8, filename_encoding=UTF-8]
+```
+
+:encoding: force the encoding of the included file
+:filename_encoding: convert the filename to the specified encoding
+
+.Title
+No
+
+.Value
+The markup value is interpreted as a filename.  A relative filename is taken to be relative to the file including it, recursively.
+
+.Semantics
+Except for filename and line number information in diagnostics the implementation shall behave as if the contents of the specified file replaced the include markup text and its parameter list.  The extension of the file is irrelevant and it will be parsed in the context of the include markup.
+
+== Defines and Named Values
+
+Defines specify named values that may be substituted in the document.  Names can be set on the command line, in the header of the document, or in the prelude/body of the document.
+
+There are also automatically defined named values specified in .... which cannot be set by the document or command line.
+
+Named values defined on the command line or in the document header are "document names", and cannot be re-defined or undefined and are visible to imported sub-documents.
+
+Named values defined in the prelude and body are "body names" and can be re-defined or undefined at any time and are not visible in imported sub-documents.
+
+.Markup Classes
+Block
+
+.Syntax
+Defines have both single line and multiple line (block) versions.
+
+```
+oneline_def: ?parameter_list [:L:]"def:" name [:W:] *(-[:L:\\] / "\\" -[]) &[:L:]
+block_def: ?parameter_list [:L:]"def::" name [:L:]
+def_delimiter: [:L:]"end::" ?name &[:L:]
+un_def: [:L:]"undef:: name *( "," name) &[:L:]
+```
+
+Defines do not accept titles.
+
+`inline_def`:: the ``name``s value is all characters after the name and one word space until but not including the next unescaped line spacing
+
+`block_def`:: the names value is all characters after the name and line spacing until a line containing `end::` and optionally a repeat of the defined name.
+
+`un_def`:: undefine the list of names
+
+.Parameters
+For defines the parameter list specifies names (and optional default values) that must be passed to the substitution, see ... for details.  
+
+```
+"[" ( name / name "=" value ) *( "," name / name "=" value ) "]"
+```
+where `name` and `value` are as defined in the parameter list syntax.
+
+.Title
+No
+
+.Value
+For the `oneline_def` the markup value is the `name` terminating at the first word spacing (not inclusive) the rest is the value not including that word spacing up to but not including the first non-escaped line spacing, the value is a pure code points sequence where the only syntax is escaped line spacing.
+
+For the `block_def` the markup value is the name.
+
+For `undef` the value is a comma separated name list.
+
+.Content
+For the `block_def` the content is the code point sequence from the start of the next line until but not including the `def_delimiter`.
+
+.Semantics
+The value of a defined name is parsed in the context of the definition but at substitution time as the substitution markup may specify parsing control parameters.
+
+== Imports
+
+Imports are the preferred method of including sub-documents and non-markup text.
+
+.Markup Classes
+Block, Inline
+
+.Syntax
+Both block and inline are available.
+
+```
+block_import: ?parameter_list [:L:]"import::" +-[:L:] &[:L:]
+inline_import: ?parameter_list "import:" +( -[:W:\\] / "\\" [:W:\\] ) &[:S:]
+```
+
+Imports do not accept titles.
+
+The markup value is the sequence of code points after the last colon up to but not including the terminating spacing.  Inline includes can have word spacing or a backslash included in the value by preceeding it with a backslash which will be removed from the value.  Block imports accept word spacing in the value without escaping.
+
+.Parameters
+```
+[ level_offset=0, syntax=auto ; named_values ]
+```
+
+where:
+
+level_offset:: signed number, specifies an offset to apply to section levels, normally the current section level is added to levels in the imported sub-document, but level_offset allows that to be adjusted if required.
+
+syntax:: specifies the syntax to parse the imported file, overrides the file extension (unless "auto")
++
+|====
+| Value | Extension | Result | Syntax
+| auto  |           |        | determine from the extension as per extension column
+| CSV   | .csv      | sequence of table cells | RFC 4180 except any line break is acceptable, not just CRLF, no header
+| CSVH  |           | sequence of table headers followed by sequence of table cells | RFC 4180 except any line break is acceptable, one line of column headers
+| Exciidoc | .Exciidoc    | Exciidoc document
+| Lxtab | .lxtab    | sequence of table headers followed by sequence of table cells | Exciidoc table markup
+|====
+
+.Title
+No
+
+.Value
+The markup value is interpreted as a filename specifying a sub-document.  A relative filename is taken to be relative to the file importing it, recursively.
+
+.Semantics
+The handling of imported files varies with the type of import.  
+
+If a `syntax=` parameter is present it will force the file to be parsed as the specified syntax irrespective of the file extension.
+
+Otherwise the file contents are inserted into the document tree as a single `Text` entity containing all the files code points.
+
+For an `inline_import` the top level entity of the imported tree must be zero or more inline entities and for `block_import` the top level entity must be zero or more block entities, sequences of inline entities at the top level of the import will be wrapped in Paragraphs.
+
+It is implementation defined if the import happens at the time the markup is parsed or later as the import cannot affect parsing of the importing document.
+
+=== Exciidoc imports
+
+For Exciidoc imports, the file contents are parsed as an Exciidoc document before the segment of document tree produced is inserted in the document tree at the location the import markup would have been inserted if it had marked up an entity. 
+
+No names defined in the sub-document are visible to the importing document.
+
+Section levels in the sub-document are adjusted so level one sections in the sub-document are one level below the level at the point of the import.  Paragraphs at the top level (ie prelude in the sub-document) are inserted at the current level.
+
+==== Name Visibility in sub-documents
+
+Substitution of named values inside the sub-document follows the following visibility rules to decide what the value of any name is at the point of the substitution.  The name will have the value it is given at the first place in the following list that it is defined, hiding the values from definitions later in the list.
+
+* an automatic name from <<anames>>
+* the parameter list of the import markup
+* a document name definition in an importing document, nested imports will see the value of the first definition in the set of nested documents
+* a document name definition in the imported document
+* a body name definition in the sub-document, it is a warning if this name is the same as any defined above
+
+=== Lxtab imports
+
+For Lxtab imports, the file contents are parsed as a sequence of table cells.
+
+=== CSV and CSVH imports
+
+For CSV and CSVH imports, the file contents are parsed as a sequence of table cells or table cells with header in accordance to RFC 4180.
+
+== Substitutes
+
+Substitutes insert a document tree generated from the value in place of the substitute markup.  They should be thought of as internal "import"s not internal "include"s.
+
+.Syntax
+```
+inline_subs: ?parameter_list "{" name ?parameter_list "}" 
+block_subs:: ?parameter_list "{{" name ?parameter_list "}}"
+```
+
+It is a warning if the `name` is not a visible named value at this point and the substitution markup is converted to text.
+
+.Parameters
+The parameter list before the primary marker (`{` or `{{`) specifies parameters for the substitute whilst the one after the `name` specifies parameters for the value and cannot contain tagged parameters, see <<Parameter Mapping>>.
+
+Primary parameter list:
+
+```
+[ &markup!markup, level_offset=0 ]
+```
+
+The secondary parameter list depends on the value definition and has no fixed parameters, but cannot contain tagged parameters.  Any named value can be defined after the `;` even document names but cannot be parameter names defined in the definition of the substitution or automatic names.
+
+.Title
+No
+
+.Value
+The markup value is the name of a value to substitute and optionally a `parameter_list` for it.
+
+.Semantics
+The named value is re-parsed in accordance with the substitute markup parse control parameters and the parameter values.
+
+The value of parameters in the second parameter list are recursively substituted in the value.
+
+It is implementation defined when substitutions take place as they cannot affect the surrounding documents parsing.
+
+=== Name Visibility in substitute values
+
+The value substituted for a name will be the value defined at the first place on the following list:
+
+* an automatic name from <<anames>>
+* names defined in the parameter list of the substitute markup
+* document names defined at the point of the substitution
+* body names defined inside the value
+
+== Parsing Controls
+
+Parsing control markups alter the structure as its normally parsed, but do not represent an entity.
+
+=== Paragraph Separator
+
+As indicated in <<...>> a Paragraph entitiy is automatically generated for sequences of inline markups.  The paragraph separator is a block markup that ends a paragraph and allows following inline entities to be automatically included in a separate Paragraph entity.
+
+.Markup Class
+Block
+
+.Syntax
+A paragraph separator is one or more blank line.
+
+```
+paragraph_separator: {2,}[:L:]
+```
+
+.Parameters
+None
+
+.Title
+No
+
+.Value
+None
+
+.Semantics
+Stop including successive inline entities into a Paragraph and start including them into another Paragraph entity.  Empty Paragraphs are discarded as noted in <<Paragraphs>> so blank lines can also be used for vertical separation in the document source for human benefit without any effect.  This also collapses multiple blank lines.
+
+=== List Item Continuation
+
+List item continuation markup includes the following entity in a list item.
+
+.Markup Class
+Block
+
+.Syntax
+```
+list_continue: [:L:]"+"&[:L:]
+```
+.Parameters
+None
+
+.Title
+No
+
+.Value
+None
+
+.Semantics
+The entity following the list continue markup is included in the current list item.
+
+The list item continuation is a block markup, so it terminates a paragraph, so it can separate two paragraphs that both are part of the list item contents.
+
+=== Header End
+
+Marks the end of the header.
+
+.Markup Class
+Block
+
+.Syntax
+```
+%[:L:]{4,}"_"&[:L:]
+
+.Parameters
+None
+
+.Title
+No
+
+.Value
+None
+
+.Contents
+None
+
+.Semantics
+Ends the header and starts the prelude/body
+
+The Header end markup is only needed when the header is followed by markup that would otherwise be part of the header.  Often the header will end when markups not allowed in it are encountered and no end is needed.
+
+=== Block Group
+
+Groups sequences of blocks as if a single block.
+
+.Markup Class
+Block
+
+.Syntax
+```
+block_group: ?parameter_list [:L:]{4,}"(" &[:L:]
+block_group_delimiter: [:L:]{4,}")" &[:L:]
+```
+
+The primary marker is a line with 4 or more open parens and the delimiter is a line with the same number of close parens.
+
+.Parameters
+```
+[&markup!markup ; named_values]
+```
+
+:&markup!markup: multiple additions and removals of markup from being parsed in content is allowed
+:named_values: named values defined only within the scope of the block.
+
+As `block_group` is intended to affect input parsing there is no output entity to attach #id, .selector or [reftext] to so they are not allowed.
+
+.Title
+No
+
+.Value
+None
+
+.Contents
+Any sequence of blocks until the delimiter.
+
+.Semantics
+The sequence of blocks in the contents are grouped for parsing purposes but creates a sequence of blocks which are added to the contents of the parent of the group without any grouping block.
+
+.Grouping
+====
+
+```
+* list text
++
+((((
+paragraph about the list
+
+* list inside 1
+* list inside 2
+* list inside 3
+
+more blah
+))))
+```
+
+creates a level one list item and adds the paragraph the level one list and the second paragraph inside the grouping to the items contents (not all backends can support this).
+====
+
+== Options TBD
+
+= Entitities
+
+The following entities are explicitly identified by markups.
+
+== Document Parts summary
+
+* Header - the document header
+* Prelude - content before the first section,often including the table of contents
+* Body - all the document sections
+
+== Block entities summary
+
+Header entities allowed:
+
+* Title - the document title, one only may contain inline class entities
+* Subtitle - the document subtitle, one only may contain inline class entities
+* Author - the document author (more than one allowed)
+* Revision - the document revision, once only
+
+Prelude entities allowed:
+
+* any delimited block class entity,
+* any list class entity,
+* Paragraph,
+* Table,
+* Table Cell, and
+* any generated content class entity.
+
+Body entities allowed:
+
+* Section,
+* any delimited block class entity,
+* Image,
+* any list class entity,
+* Paragraph,
+* Table,
+* Table Header Cell,
+* Table Cell, and
+* any generated content class entity.
+
+Delimited block class entities are:
+
+* Aside - content set out from the normal flow
+* Preformatted - content with predefined structure, inline markup allowed, not monospaced
+* Example - content intended as an example
+* Block Literal - content with predefined structure and no internal markup, monospaced by default
+* Block Listing - content with predefined structure, inline markup allowed, monospaced by default
+* Admonition - content emphasised
+
+List class entities are:
+
+* Unordered list item
+* Ordered list item
+* Definition list item
+* Quote list item
+* Callout list item
+* Footnote list
+* Footnote list items
+
+Generated content class entities are:
+
+* Table of Contents
+* Table of Figures
+* Index
+* Glossary
+
+== Inline entities summary
+
+Inline class entities are:
+
+* Text
+* Math
+* Strong
+* Emphasis
+* Inline Listing
+* Inline Literal
+* Highlight
+* Footnote Reference
+* Reference
+* any link class entity
+* Superscript
+* Subscript
+* Callouts
+* any codepoint class entity
+
+Link class entities are:
+
+* Http
+* Https
+* Mailto
+* FTP
+
+Codepoint class entities describe code points in ASCII:
+
+* Named code points
+* Numbered code points
+* Art code points
+
+
+== Explicit Entities
+
+The following sections list entities that are created by explicit markup in alphabetical order.
+
+=== Admonition Entity
+
+The `Admonition` entity indicates content generally expected to be rendered to stand out from the flow of text.
+
+.Markup classes
+Block
+
+.Syntax
+```
+admonition: ?parameter_list ?title [:L:]"!!!" *-[:L:] &[:L:]
+admonition_delimiter: [:L:]"!!!"
+```
+
+.Parameters
+```
+[#id[ref text].selector&markup!markup]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in content is allowed
+
+.Title
+Yes
+
+.Value
+The value is the non-line spacing code points up to but not including the next line spacing code point.
+
+.Content
+Delimited by `admonition_delimiter`. Any inline class markups, any block class markups except Section and Admonition of the same type.  Current list nest level is set to zero within the content, and reset after the delimiter.
+
+.Semantics
+The markup value should be interpreted by the backend as a type of admonition and use that to select the handling and styling of the entity.  Backends define valid types, typically `note`, `tip`, `warning`, or `error`.  There must be one valid type, which is the default, typically `note`.  An admonition type that is not available in the current backend is a warning and the default should be used.  Admonitions which have a different type can nest, eg a warning inside a tip.
+
+=== Art code point Entity
+
+todo apostrophe
+
+ASCII art code points are markups that are replaced by a single code point.  Most markups look like the replacement, hence the name, but there is a syntax for entering arbitary code point values.
+
+.Markup classes
+Inline
+
+.Syntax
+```
+art_code: "(C)" / "(TM)" / "(R)" / "\"`" / "\`"" / "\'`" "\`'" / "..."
+          / "&" ( ( "#" ( +[0-9] / "x" [0-9a-fA-F] ) ) / name ) ";"
+```
+
+.Parameters
+None
+
+.Title
+No
+
+.Value
+Markups starting with `&` and ending with `;` the value is either a decimal or hex code point number, or a code point name.  Backends may limit the names they accept.
+
+.Content
+None
+
+.Semantics
+The markup is replaced by the specified code point as per the following table:
+
+|====
+| Art | Code Point
+| (C) | Copyright
+| (TM) | Trademark
+| (R) | Registered
+| "`  | Curly opening double quotes
+| `"  | Curly closing double quotes
+| '`  | Curly opening single quote
+| `'  | Curly closing single quote
+| ... | ellipsis
+|====
+
+It is not defined if the backend will generate actual encoded code points or content that represents them, eg HTML entities in HTML backends.
+
+Note that the quotes are not paired, so to get a curly apostrophe just use `\`'` eg entity`'s parameters
+
+=== Aside Entity
+
+An aside entity holds content that is intended to be presented outside the normal content flow.
+
+.Markup classes
+Block
+
+.Syntax
+```
+aside: ?parameter_list ?title [:L:] {4,}"*" &[:L:]
+aside_delimiter: [:L:]{4,}"*"&[:L:]
+```
+.Parameters
+```
+[#id[ref text].selector&markup!markup ; named_values]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in content is allowed
+:named_values: named values set for the scope of the contents
+
+.Title
+Yes
+
+.Value
+None
+
+.Content
+Delimited by an `aside_delimiter` which has the same number of `*`s as the primary marker. Any inline class markups, any block class markups except Section are allowed.  Current list nest level is set to zero within the content, and reset after the delimiter.  Nested aside markups must have more `*`s than containing admonition markups.
+
+.Semantics
+Nested Aside markups and markup delimiters which have fewer `*`s than the enclosing markup is a warning and that marker is ignored.  Backends may limit or disallow nested Asides, for example if they cannot be reasonably represented in the backend format.
+
+=== Block Line Entity
+
+A block line entity keeps the line layout of its content, but otherwise is normal markup, cf <<Block Listing Entity>> and <<Block Literal Entity>>.  Potential useage is maintaining the line breaks in verse without enforcing monospace fonts.
+
+.Markup classes
+Block
+
+.Syntax
+```
+block_line: ?parameter_list ?title [:L:] {4,}"." [:L:]
+block_line_delimiter: [:L:]{4,}"." &[:L:]
+```
+
+.Parameters
+```
+[#id[ref text].selector&markup!markup ; named_values]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in content is allowed
+:named_values: named values set for the scope of the contents
+
+.Title
+Yes
+
+.Value
+No
+
+.Content
+The content is the sequence of inline entities between the primary marker and the delimiter with the same number of dots.  The content is parsed into text line entities to allow preserving line breaks.
+
+.Semantics
+Nesting is not possible since only inline markups are parsed inside content, the varying length primary and delimiting markers are to avoid clashes with content.  Expected to be rendered with line breaks preserved.
+
+=== Block Listing Entity
+
+A Listing block keeps the content line layout, and typically uses monospaced fonts cf <<Block Line Entity>> and <<Block Literal Entity>>.
+
+.Markup classes
+Block
+
+.Syntax
+```
+listing: ?parameter_list ?title [:L:]{4,}"+" &[:L:]
+listing delimiter: [:L:]{4,}"+" &[:L:]
+```
+
+.Parameters
+```
+[#id[ref text].selector&markup!markup ; named_values]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in content is allowed
+:named_values: named values set for the scope of the contents
+ 
+.Title
+Yes
+
+.Value
+None
+
+.Content
+Any inline markup delimited by `listing_delimiter` with the same number of `+`s as the primary markup.  Content is parsed into Text Lines (see ...) allowing preserving line breaks.
+
+.Semantics
+Nesting is not possible since only inline markups are parsed inside content, the varying length primary and delimiting markers are to avoid clashes with content.  Expected to be rendered with line breaks preserved and in monospaced font.
+
+=== Block Literal Entity
+
+A Literal block keeps the content line layout and by default parses no other markup, cf <<Block Line Entity>> and <<Block Listing Entity>>.
+
+.Markup classes
+Block
+
+.Syntax
+```
+literal: ?parameter_list ?title [:L:]{3,}"`" *-[:L:] &[:L:]
+literal_delimiter: [:L:]{3,}"`" &[:L:]
+```
+
+.Parameters
+```
+[#id[ref text].selector&markup!markup ; named_values]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in content is allowed
+:named_values: named values set for the scope of the contents, &substitute is needed
+
+.Title
+Yes
+
+.Value
+The code points between the primary marker and the next line spacing.
+
+.Content
+Delimited by `literal_delimiter` with the same number of `\``s as the primary markup.  By default no markup is recognised inside literal blocks except line breaks and the delimiter.  Content is parsed into Text lines (see ...) to allow line breaks to be preserved.
+
+.Semantics
+Backends may style content in accordance with the markup value, with a default monospace styling and line breaks preserved if no value is present.  Backends may limit which values they accept, but should provide a warning and revert to the default if the value is not accepted.
+
+Nesting is not possible, the varying length primary marker and delimiting marker is to allow avoiding clashes with content.
+
+=== Callout list item Entity
+
+Item in a callout list.
+
+.Markup classes
+Block
+
+.Syntax
+```
+{0,2}parameter_list [:L:]*[:W:]"<" name ">" [:W:]
+```
+
+.Parameters
+If there are two parameter lists the first one applies to the list entity and the second applies to the list item entity and a new list is forced, even if an existing list could have continued.  If there is only one parameter list it applies to the list item entity.
+
+List parameters:
+```
+[#id[ref text].selector, num_format=default ; named_values]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+:num_format: set the format for numbering, backend specific
+:named_values: named values set for the scope of the contents
+
+List item parameters:
+```
+[#id[ref text].selector&markup!markup; named_values]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in content is allowed
+:named_values: named values set for the scope of the contents
+
+.Title
+None
+
+.Value
+The value between the primary marker (the `<`) and the end marker (`>`) must be a `name`.
+
+.Content
+Content is the paragraph following the markup and block entities attached by a list continuation markup (see ...).  Callout lists have no nest capability.
+
+.Semantics
+The `name` in the markup value must match a name in a preceeding callout reference that has not been matched by a callout list item before.
+
+Semantic checks verify that the callout lists cover all callout names for callouts between the list and the previous list or document start.
+
+TBD numbering order.  backlinks when multiple callouts to same item (parameters ???)  rendering with icon numbers
+
+=== Callout reference Entity
+
+A callout reference links to a callout list item.
+
+.Markup classes
+Inline
+
+.Syntax
+```
+callout: +("<"name">")&[:L:]
+```
+
+One or more callouts can be listed and must be at the end of the line.
+
+.Parameters
+None
+
+.Title
+No
+
+.Value
+The markup value(s) are names.
+
+.Content
+None
+
+.Semantics
+Callouts link to the following callout list, so a name can be re-used for another list, allowing "numbered" callouts using one letter and a number, eg "c1" "c2" etc.
+
+=== Definition list item Entity
+
+Definition list items consist of two text pieces, a term and a description.
+
+.Markup classes
+Block
+
+.Syntax
+```
+definition_list_item: {0,2}parameter_list [:L:]*[:W:] +":" [:W:] +(-[:L:\\:] / "\\" -[])  ":" &[:S:]
+```
+
+The definition list item primary marker is a sequence of colon characters as first non-spacing on the line followed by a value to the end marker, the next unescaped colon which must be followed by spacing.
+
+.Parameters
+If there are two parameter lists the first applies to the list itself and the second to the item, if only one it applies to the item.  Two parameter lists indicates this is a list start item.
+
+List parameters
+```
+[#id[ref text].selector, num_format=default; named_values]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in content is allowed
+:num_format: numbering format for the list, default is none, others are backend specific
+:named_values: named values set for the scope of the contents
+
+List item parameters:
+```
+[#id[ref text].selector&markup!markup; named_values]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in content is allowed
+:named_values: named values set for the scope of the contents
+
+.Title
+None
+
+.Value
+The value is the code point sequence between the primary marker and the end marker and is interpreted as an inline markup text line (see ...).
+
+.Content
+The content of the list item is the paragraph following the markup and blocks attached by list item continuation markup (see <<List Item Continuation>>) and immediately following nested lists (see <<Lists>>)
+
+.Semantics
+The definition list item markup value is the term to be described by the item contents.
+
+=== Emphasis Entity
+
+Indicates emphasised text, by default italic.
+
+.Markup classes
+Inline
+
+.Syntax
+```
+cons_em: (?parameter_list / %[:S:]) "_" &-[:S:]
+cons_em_delimiter: %-[:S:] "_" &[:S:]
+uncon_em: ?parameter_list "__"
+uncon_em_delimiter: "__"
+```
+
+Constrained markups (`cons_*`) use a single underscore and the context to reduce the chances of unwanted markup detection in normal content.
+
+Unconstrained markups (`uncon_*`) use two underscores which is considered less likely in normal text content.
+
+.Parameters
+List item parameters:
+```
+[#id[ref text].selector&markup!markup]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in content is allowed
+
+.Title
+No
+
+.Value
+None
+
+.Content
+Any inline markup.  Emphasis may nest.
+
+.Semantics
+Emphasis markups show italic by default, nested emphasis may show additional visual indication depending on backend capabilities.
+
+=== Example Entity
+
+Indicates an example.
+
+.Markup classes
+Block
+
+.Syntax
+```
+example: ?parameter_list ?title [:L:]{4,}"=" &[:L:]
+example_delimiter: [:L:]{4,}"=" &[:L:]
+```
+
+.Parameters
+```
+[#id[ref text].selector&markup!markup-counted; named_values]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in content is allowed
+:-counted: do not put the counter in the title (or increment it)
+:named_values: named values set for the scope of the contents
+
+.Title
+Yes, default prefixed by "Example nnn " where nnn is the example counter.  It is possible to generate a table of examples.
+
+.Value
+No
+
+.Content
+Content is a sequence of block entities until an `example_delimiter` with the same number of `=` as the primary markup.
+
+.Semantics
+Examples can nest if the number of equals in the primary markup and delimiter is greater than that of the enclosing markup.
+
+=== Footnote List
+
+A footnote list makes footnote list items from the remarks for footnotes preceeding this list.  
+
+.Markup Classes
+Block
+
+.Syntax
+```
+footnotes: ?parameter_list ?title [:L:] "footnotes::" &[:L:]
+```
+
+.Parameters
+```
+[#id[ref text].selector, num_format=default, numbering=c_r, position=before; named_values]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in content is allowed
+:num_format: numbering format for the list, other than "default" values are backend specific
+:numbering: control footnote and footnote reference numbering (see <<#foot_num>>)
+:position: where to locate footnotes that are not explicitly listed in the list (see <<#foot_pos>>)
+:named_values: named values set for the scope of the contents
+
+.Title
+Yes, replaces a default title for the list "Footnotes"
+
+.Value
+No
+
+.Content
+Any contiguous sequence of footnote list item entities following the footnote list markup.
+
+.Semantics
+The remarks are collected from all preceeding footnotes since the last footnote list or the start of the document and the remarks from footnote list items in the comments and a numbered list with the remarks as content is created.
+
+[#foot_num]
+.Footnote numbering
+Footnote numbering is controlled by the `numbering` parameter which is an underscore separated list of the following values:
+
+:default: equivalent to "continuous_reference"
+:continue: the numbering is continuous in the document
+:new: the numbering resets for references to this footnote list
+:reference: the numbering is in the order of occurrance of the references
+:list: the numbering is in the order of the list
+
+The last value is used if repeated, may be abbreviated to any unique abbreviation (down to first letter).
+
+[#foot_pos]
+.Footnote Positions
+The `position` parameter controls where footnotes with the text in the reference are located relative to any explicit list items:
+
+:before: place befopre the explicit footnote items
+:after: place after explicit footnote items
+
+=== Footnote List item
+
+Add remarks for named footnotes that have none yet.
+
+.Markup Class
+Block
+
+.Syntax
+```
+footnote: ?parameter_list [:L:] "footnote::" name &[:L:]
+```
+
+.Parameters
+```
+[#id[ref text].selector&markup!markup; named_values]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in content is allowed
+:named_values: named values set for the scope of the contents
+
+.Title
+None
+
+.Value
+The value is the name following the primary marker to the end of the line.
+
+.Content
+Content is the paragraph following the markup and block entities attached by a list continuation markup (see ...).  Footnote lists do not nest but other lists may nest in them.
+
+.Semantics
+Defines the remark for the named footnote.  Unlike footnote references the content can include blocks.  No references with the same name as a footnote list item may contain content.
+
+=== Footnote Reference Entity
+
+
+.Markup classes
+Inline
+
+.Syntax
+```
+footnote: "[^" (name | "#")
+footnote_delimiter: "^]"
+```
+
+.Parameters
+None
+
+.Title
+None
+
+.Value
+The value is the name or `#` following the primary markup.
+
+.Content
+The content is any inline entities following the value and forms the footnote remark.  If the remark is to contain block content it must be defined by a footnote list item in the footnote list, and no footnote references to the same named footnote may contain content.
+
+.Semantics
+Footnotes should render as numbered links to the footnote list item, traditionally in square brackets and superscript.
+
+Footnotes transfer their content to the next footnote list in the document.  Footnotes with the same `name` in the markup value link to the same item in the footnote list, and it is an error if more than one footnote with the same name has content.  If none of the footnotes with the same name has content it must be provided by the footnote list item.
+
+Footnotes with a value of `#` must have content and cannot be referred to by other footnotes.
+
+=== FTP Entity
+
+Link to an FTP source.
+
+.Markup classes
+Inline
+
+.Syntax
+```
+ftp: ?parameter_list "ftp:" +( -[:W:\\:] / "\\" -[] ) &([:S:] / ":")
+```
+
+.Parameters
+```
+[#id[ref text].selector&markup!markup]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in the value are allowed
+
+.Title
+No
+
+.Value
+From the primary markep to the first unescaped spacing or colon code point.  Using the colon allows punctuation immediately after the markup, eg full stop.
+
+.Content
+None
+
+.Semantics
+The primary marker and the value are taken as a link target, the `alt_text` parameter provides text for the link.
+
+=== Glossary Entity
+
+An entity generating a glossary.
+
+.Markup classes
+Block, Section
+
+.Syntax
+```
+?parameter_list ?title [:L:] +"=" ":glossary" &[:L:]
+```
+
+.Parameters
+```
+[#id[ref text].selector+number]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+:+number: the `number` option defaults to off, numbering the section or not.
+
+.Title
+Yes, default title is "Glossary" if not present
+
+.Value
+None
+
+.Content
+The content is a single labelled list entity
+
+.Semantics
+Makes a glossary TODO fill out bit
+
+Nests within a section which has one less `=`.
+
+=== Highlight Entity
+
+The highlight entity defaults to showing text as highlighted.
+
+.Markup classes
+Inline
+
+.Syntax
+```
+cons_high: (?parameter_list / %[:S:]) "#" &-[:S:]
+cons_high_delimiter: %-[:S:] "#" &[:S:]
+uncon_high: ?parameter_list "##"
+uncon_high_delimiter: "##"
+```
+
+Constrained markups (`cons_*`) use a single hash and the context to reduce the chances of unwanted markup detection in normal content.
+
+Unconstrained markups (`uncon_*`) use two hashes which is considered less likely in normal text content.
+
+.Parameters
+```
+[#id[ref text].selector&markup!markup]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in content is allowed
+
+.Title
+No
+
+.Value
+No
+
+.Content
+The content is the sequence of inline entities between the `cons_high` or `uncons_high` and the matching delimiter.
+
+.Semantics
+By default the inline text is highlighted.
+
+=== Http Entity
+
+Link to an HTTP source.
+
+.Markup classes
+Inline
+
+.Syntax
+```
+http: ?parameter_list "http:" +( -[:W:\\] / "\\" -[] ) &[:S:]
+```
+
+.Parameters
+```
+[#id[ref text].selector&markup!markup, alt_text ]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in the value is allowed
+:alt_text: alternate text to show for the link
+
+.Title
+No
+
+.Value
+From the primary markep to the first unescaped spacing code point.
+
+.Content
+None
+
+.Semantics
+The primary marker and the value are taken as a link target, the `alt_text` parameter provides text for the link.
+
+=== Https Entity
+
+Link to an HTTPS source.
+
+.Markup classes
+Inline
+
+.Syntax
+```
+https: ?parameter_list "https:" +( -[:W:\\] / "\\" -[] ) &[:S:]
+```
+
+.Parameters
+```
+[#id[ref text].selector&markup!markup, alt_text ]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is URL
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in the value is allowed
+:alt_text: alternate text to show for the link
+
+.Title
+No
+
+.Value
+From the primary markep to the first unescaped spacing code point.
+
+.Content
+None
+
+.Semantics
+The primary marker and the value are taken as a link target, the `alt_text` parameter provides text for the link.
+
+=== Image Entity
+
+Insert and image from a file in the document.
+
+.Markup classes
+Block, Inline
+
+.Syntax
+```
+block_image: ?parameter_list ?title [:L:]"image::" +( -[:L:\\] / "\\" -[]) &[:L:]
+inline_image: ?parameter_list "image:" +( -[:W:\\] / "\\" -[] ) &[:S:]
+```
+
+.Parameters
+```
+[#id[ref text].selector&markup!markup-counted, alt_text, hsize, vsize, float=none, align=center]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is title if present, or alt_text
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in the value is allowed
+:-counted: do not put the counter in the title (or increment it)
+:alt_text: alternate text to show for the image
+:hsize: horizontal size, see Semantics
+:vsize: vertical size, see Seamntics
+:float: side of flowing entities to put image
+:align: where to position image in space available
+
+.Title
+The `block_image` title provides a figure title for the image, added to the figures list, by default adds "Figure nnn " before the title where nnn is the figure counter.  It is possible to generate a table of figures.
+
+.Value
+The code point sequence between the primary marker and the end marker is taken as a filename.  
+
+.Content
+None
+
+.Semantics
+By default inline substitutes are parsed in the filename and substituted (to one level only!!) before the filename is used, escaping or `!substitute` prevents that.
+
+Sizes specified in the parameter list are interpreted by backends, by default a plain number is some sort of pixels and `%` or `em` or `mm` may be accepted.
+
+Float and align capabilities and values depend on the backends.
+
+=== Index Entity
+
+The index entity provides an index to terms in the document collected from indexterm entities in the document.
+
+.Markup classes
+Block
+
+.Syntax
+```
+index: ?parameter_list ?title [:L:] +"=" ":index"  ?name *( [:W:] name ) &[:L:]
+
+.Parameters
+```
+[#id[ref text].selector+number, sort=code]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is title
+:.selector: multiple selectors are allowed
+:+number: the `number` option defaults to off, numbering the section or not.
+:sort: how the entries are to be sorted in the index, default is by code point value, backends may accept other values
+
+.Title
+Yes, default title is "Index" followed by the markup value.
+
+.Value
+The markup value is a word space separated list of index names.
+
+.Content
+None
+
+.Semantics
+Creates an index (a sequence of index entries consisting of the index terms and a list of links to each of the term entities with the same term) for the index sets named by the markup value, or all sets if no names specified.  Possible uses of named sets are indexes for each document part or major section plus a complete index at the end.
+
+For each index term entity in the named set(s) (or all sets if no names) an index entry will be added if it does not already exist and a link to the index term added to the list of links for the entry.
+
+=== Index Term entity
+
+Specifies an index entry to be added to the (optionally named) index set.
+
+.Markup classes
+Inline
+
+.Syntax
+```
+single_term: "((" ?("#"name [:W:]) +( !"))" *( "\\))" / -[] ) ) "))"
+multi_term: "(((" ?("#"name [:W:]) +( !")))" *( "\\)))" / -[,\\] / "\\" -[] ) 
+                 *( "," *( "\\)))" / -[,\\] / "\\" -[] ) ")))"
+```
+
+.Parameters
+None
+
+.Title
+None
+
+.Value
+Both values consist of optionally a hash followed by a name of an index set followed in the `single_term` case by one term, and in the `multi_term` case a comma separated list of terms.
+ 
+.Content
+None
+
+.Semantics
+There is no visible content for the Index Term entity, but a link anchor will be created for it.
+
+=== Inline Listing Entity
+
+An inline listing entity is typically displayed in monospaced font.
+
+.Markup classes
+Inline
+
+.Syntax
+```
+cons_list: (?parameter_list / %[:S:]) "+" &-[:S:]
+cons_list_delimiter: %-[:S:] "+" &[:S:]
+uncon_list: ?parameter_list "++"
+uncon_list_delimiter: "++"
+```
+
+Constrained markups (`cons_*`) use a single plus and the context to reduce the chances of unwanted markup detection in normal content.
+
+Unconstrained markups (`uncon_*`) use two pluses which is considered less likely in normal text content.
+
+.Parameters
+```
+[#id[ref text].selector&markup!markup]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in content is allowed
+
+.Title
+None
+
+.Value
+None
+
+.Content
+The content is the sequence of inline entities between the `cons_list` or `uncons_list` and the matching delimiter.
+
+.Semantics
+By default the inline text is monospaced.
+
+=== Inline Literal Entity
+
+An inline literal entity content is typically not parsed for markup and is displayed in monospaced font.
+
+.Markup classes
+Inline
+
+.Syntax
+```
+cons_lit: (?parameter_list / %[:S:]) "\`" &-[:S:]
+cons_lit_delimiter: %-[:S:] "\`"
+uncon_lit: ?parameter_list "\``"
+uncon_lit_delimiter: "\``"
+```
+
+Constrained markups (`cons_*`) use a single backquote and the context to reduce the chances of unwanted markup detection in normal content.  Note the constrained delimiter does not require space after it unlike most other single code point constrained markups.
+
+Unconstrained markups (`uncon_*`) use two backquotes which is considered less likely in normal text content.
+
+.Parameters
+```
+[#id[ref text].selector&markup!markup]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in content is allowed
+
+.Title
+None
+
+.Value
+None
+
+.Content
+The content is the sequence of inline entities between the `cons_lit` or `uncons_lit` and the matching delimiter.
+
+.Semantics
+By default the inline text is monospaced.
+
+=== Mailto Entity
+
+Creates a link to open a mailer.
+
+.Markup classes
+Inline
+
+.Syntax
+```
+mailto: ?parameter_list "mailto:" *( -[:W:\\] / "\\" -[] ) &[:S:]
+```
+
+.Parameters
+```
+[#id[ref text].selector&markup!markup, alt_text ]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is URL
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in the value is allowed
+:alt_text: alternate text to show for the link
+
+.Title
+No
+
+.Value
+From the primary markep to the first unescaped spacing code point.
+
+.Content
+None
+
+.Semantics
+The primary marker and the value are taken as a link target, the `alt_text` parameter provides text for the link.
+
+=== Math Entity
+
+Mark content as math formatted.
+
+.Markup classes
+Block, Inline
+
+.Syntax
+```
+inline_math: ?parameter_list "$$"
+inline_math_delimiter: "$$"
+block_math: ?parameter_list .title [:L:] {4,}"$" &[:L:]
+block_math_delimiter: [:L:] {4,}"$" &[:L:]
+```
+
+.Parameters
+```
+[#id[ref text].selector&markup!markup, format]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is title or none
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in the content is allowed
+:format: specify the format the math markup is in, backends may select a default when not specified and which formats they accept.
+
+.Title
+Yes for the `block_math`, added to the equation list, by default adds "Equation nnn " before the title, where nnn is the equation counter.  It is possible to generate a table of equations.
+
+.Value
+None
+
+.Content
+Content is from the end of the primary marker to the delimiter marker and by default is not parsed for anything except the delimiter.
+
+.Semantics
+The content is to be formatted as an equation by the backend, using the specified or default format.  This may involve the backend running an external program.  
+
+=== Ordered list item Entity
+
+Item in an ordered (numbered) list.
+
+.Markup classes
+Block
+
+.Syntax
+```
+ordered_list: {0,2}parameter_list [:L:]*[:W:] *[0-9] +"." [:W:]
+```
+
+.Parameters
+If there are two parameter lists the first one applies to the list entity and the second applies to the list item entity and a new list is forced, even if an existing list could have continued.  If there is only one parameter list it applies to the list item entity.
+
+List parameters:
+```
+[#id[ref text].selector-numbering]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is title or none
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in the content is allowed
+:-numbering: turn off numbering, default is on
+
+List item parameters:
+```
+[#id[ref text].selector&markup!markup; named_values]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in content is allowed
+:named_values: named values set for the scope of the contents
+
+.Title
+None
+
+.Value
+The value is the optional decimal number preceeding the dots.
+
+.Content
+Content is the paragraph following the markup and block entities attached by a list continuation markup (see ...).  Lower level ordered lists nest within lists (any list type) with higher level without list continuation being needed.
+
+.Semantics
+By default renders as a numbered list, differing levels use differing numbering schemes specified by teh backends.
+
+The decimal number that is the position of the item in the list.  Positions must increase between list items in the same list, cannot repeat, but can have gaps.  Backends may use the position to generate the number for the list item.
+
+=== Quote list item Entity
+
+A quote list is a sequence of content quoted from prior writings/communications.
+
+.Markup classes
+Block
+
+.Syntax
+```
+quote_item: {0,2}parameter_list [:L:] *[:W:] +">" [:W:] 
+```
+
+.Parameters
+If there are two parameter lists the first one applies to the list entity and the second applies to the list item entity and a new list is forced, even if an existing list could have continued.  If there is only one parameter list it applies to the list item entity.
+
+List parameters:
+```
+[#id[ref text].selector]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+
+List item parameters:
+```
+[#id[ref text].selector&markup!markup]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in content is allowed
+
+
+.Title
+None
+
+.Value
+None
+
+.Content
+Content is the paragraph following the markup and block entities attached by a list continuation markup (see ...).  Lower level quote lists nest within lists (any list type) with higher level without list continuation being needed.
+
+.Semantics
+By default renders with vertical bars for each new level of quotes.
+
+=== Reference Entity
+
+A reference to another position in the document.
+
+.Markup classes
+Inline
+
+.Syntax
+```
+reference: ?parameter_list "<<" ( "#" name / +( !">>" (-[\\] / "\\" ( ">>" / -[] )) ) ) ">>"
+```
+
+.Parameters
+```
+[ #id[ref text].selector, rep_text ]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+:rep_text: replacement for the targets ref text
+
+.Title
+No
+
+.Value
+The value is a hash followed by a name or the text between "<<" and ">>".
+
+.Content
+None
+
+.Semantics
+The reference should make a link to the target ID with text provided by the `ref_text` in the parameter list or if none, the `ref_text` of the target or if none the original value.
+
+[#numb_sect_ref]
+If the value is `#name` the target ID is the `name`, otherwise if `#name` is not present the text is converted to the target ID using the Section algorithm, see <<auto_id>> except that the section number cannot be added automatically to an ambiguous ID, it needs to be provided.  Providing a section number allows disambiguating sections, for example if this document used sections for the `Syntax` items there would be many ambiguous targets for a `<<syntax>>` reference but a `<<1.2.3.4.5syntax>>` could specify a particular item.
+
+Note the `#name` syntax is needed because the algorithm generates IDs ending in underscore which a `name` cannot have, otherwise a name would be unchanged by the ID algorithm.
+
+=== Section Entity
+
+Sections are the major document structure construct.
+
+.Markup classes
+Block
+
+.Syntax
+```
+section: ?parameter_list [:L:]{1,}"=" [:W:] +-[:L:] &[:L:]
+```
+
+Level is the number of `=`s
+
+.Parameters
+```
+[ #id[ref text].selector ]
+```
+
+:#id: one id is allowed, by default an automatic one is generated from the title (see Semantics)
+:ref text: text to use in cross references, default is the title
+:.selector: multiple selectors are allowed
+
+.Title
+The title is the text after the word spacing ending the primary marker to the end of the line.
+
+.Value
+None
+
+.Content
+Any sequence of block content up to but not including a section entity of the same or lower level.
+Top level sections (one `=`) are children of the body.
+
+.Semantics
+A section is ecpected to be rendered as a clear division of the document with the title as the header.  Sections may be autonumbered depending on backends and options.
+
+[#auto_id]
+Unless the ID is set by the parameter list Sections generates an automatic ID using the following algorithm:
+
+For each code point:
+* start with the ASCII letter `I`
+* if it is an ASCII alphabetic, convert it to lowercase
+* if it is an ASCII numeric or underscore, leave it unchanged
+* if it is any spacing code point, remove it
+* if it is any other ASCII code point, use underscore instead
+* if it is any other code point and the option `non-ASCII-ID` is set, use it unchanged, otherwise use dash instead
+* add underscore at the end
+
+If this is not unambiguous it is a warning and:
+
+* add the section number after the `I` in the form of a dot separated list of decimal numbers indicating the section numbers for each level up to and including this section.
+
+As detailed [here]<<#numb_sect_ref>> IDs containing the number can be referenced, but as section numbers are not fixed, manual IDs may be a better choice unless the document layout is very stable.
+
+=== Strong Entity
+Indicates strong text, by default bold.
+
+.Markup classes
+Inline
+
+.Syntax
+```
+cons_em: (?parameter_list / %[:S:]) "*" &-[:S:]
+cons_em_delimiter: %-[:S:] "*" &[:S:]
+uncon_em: ?parameter_list "**"
+uncon_em_delimiter: "**"
+```
+
+Constrained markups (`cons_*`) use a single star and the context to reduce the chances of unwanted markup detection in normal content.
+
+Unconstrained markups (`uncon_*`) use two stars which is considered less likely in normal text content.
+
+.Parameters
+List item parameters:
+```
+[#id[ref text].selector&markup!markup]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in content is allowed
+
+.Title
+No
+
+.Value
+None
+
+.Content
+Any inline markup.  Strong may nest.
+
+.Semantics
+Strong markups show bold by default, nested strong may show additional visual indication depending on backend capabilities.
+
+=== Subscript Entity
+Indicates text to be shown as subscript.
+
+.Markup classes
+Inline
+
+.Syntax
+```
+subscript: ?parameter_list "^"
+subscript_delimiter: "^"
+```
+
+.Parameters
+List item parameters:
+```
+[#id[ref text].selector&markup!markup]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in content is allowed
+
+.Title
+No
+
+.Value
+None
+
+.Content
+Any inline markup.  Subscript may nest.
+
+.Semantics
+Subscript markups show a subscript font face by default, nested subscripts may show additional visual indication depending on backend capabilities.
+
+=== Superscript Entity
+Indicates text to be shown as subscript.
+
+.Markup classes
+Inline
+
+.Syntax
+```
+subscript: ?parameter_list "^"
+subscript_delimiter: "^"
+```
+
+.Parameters
+List item parameters:
+```
+[#id[ref text].selector&markup!markup]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in content is allowed
+
+.Title
+No
+
+.Value
+None
+
+.Content
+Any inline markup.  Subscript may nest.
+
+.Semantics
+Subscript markups show a subscript font face by default, nested subscripts may show additional visual indication depending on backend capabilities.
+
+=== Table Entity
+
+The table entity holds teh components of a table.
+
+.Markup classes
+Block
+
+.Syntax
+```
+table: ?parameter_list ?title [:L:]"|"{4,}"=" &[:L:]
+table_delimiter: [:L:]"|"{4,}"=" &[:L:]
+```
+
+The `table_delimiter` must have the same number of `=`s as the `table` markup.
+
+.Parameters
+```
+[#id[ref text].selector&markup!markup, cols=column_spec, headers=1, format=default]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in content is allowed
+:cols: defines the columns
+:headers: number of rows to make headers, overridden by the explicit header syntax, see ...
+:format: the format of table content, most useful if content is `include::`ed
+::default: default table cell markup
+::CSV: comma separated values per RFC 4180
+
+The `column_spec` has the syntax:
+
+```
+column_spec: number / cspec *( "," cspec )
+cspec: ?multiplier ?width ?align ?format
+repeat: number "*"
+width: number
+align: [<^>] ?(valign) / valign
+valign: "." [<^>]
+markup: [aelmps]
+```
+
+where the parts mean:
+
+:number: if the `column_spec` is just a number it is the number of columns
+:repeat: how many columns the spec applies to
+:width: a relative number, see semantics
+:align: is `<` for left, `^` is for centre, and `>` is for right
+:valign: is `<` for top, `^` is for centre, and `>` is for bottom
+:markup: treat the cell contents as if it is in a delimited block as per the following table:
+
+|====
+| a | any markup except section, effectively no block, or group block.
+| e | emphasis, group block with default emphasis styling
+| l | literal, literal block
+| m | monospace, listing block
+| p | paragraph, default
+| s | strong, group block with default strong styling
+|====
+
+The cols spec is most useful if the cell format is non-default and does not have formatting markup available in its content.
+
+.Title
+Yes
+
+.Value
+No
+
+.Content
+Header cell list and body cell list.
+
+.Semantics
+Display as a table with header cell list as headers.
+
+When the table content is CSV the `cols` and `header` options are used to set the formatting since CSV has no syntax for that in the data.  If the content is marked up table headers and table cells or imported these options are ignored except for setting the default styling for columns (when it is valid for the `cols` to specify more/less columns than the data.
+
+If `cols` is not specified the number of columns is the number of header cells, and if no header cells are provided the number of columns is the number of unescaped `|` code points in the first line of the content. Note that this is not parsing cells, so it may be confused by `|` in the cell content.
+
+=== Table Header Cell Entity
+
+Specifies a header cell list item.
+
+.Markup classes
+Block, but note it is not line context anchored.
+
+.Syntax
+```
+header_cell: "|_" cell_spec
+```
+
+For `cell_spec` see <<cell_spec>>
+
+.Parameters
+None (actually in cell_spec)
+
+.Title
+None
+
+.Value
+See `cell_spec`
+
+.Content
+Any block markups except section.
+
+.Semantics
+Defines a header cell.
+
+=== Table Cell Entity
+
+Block, but note it is not line context anchored.
+
+.Syntax
+```
+cell: "|" cell_spec [:S:]
+```
+
+For `cell_spec` see <<cell_spec>>
+
+.Parameters
+None (actually in cell_spec)
+
+.Title
+None
+
+.Value
+See `cell_spec`
+
+.Content
+Any block markups except section unless a column specification exists for the column which may limit content parsed.
+
+.Semantics
+Defines a cell.
+
+[#cell_spec]
+==== Cell Specification
+
+Both header cell and body cell markups use the same `cell_spec` specification which has the syntax:
+
+```
+cell_spec: ?repeat ?span ?align ?markup
+repeat: "*" number
+span: "+" (number ? ("." number) / "." number)
+align: [<^>] ?("." valign) / "." valign
+valign: [<^>]
+markup: [aelmps]
+```
+
+where:
+
+:repeat: the number specifies how many times to repeat the cell content
+:span: the number specifies how many columns the cell should occupy, the `.` number specifies how many rows the cell should occupy
+:align:is `<` for left, `^` is for centre, and `>` is for right
+:valign: is `<` for top, `^` is for centre, and `>` is for bottom
+:markup: treat the cell contents as if it is in a delimited block as per the following table:
+
+|====
+| a | any markup except section, effectively group block.
+| e | emphasis, group block with default emphasis styling
+| l | literal, literal block
+| m | monospace, listing block
+| p | paragraph, default
+| s | strong, group block with default strong styling
+|====
+
+=== Table of Contents Entity
+
+The table of contents entity specifies where a table of contents should be placed.
+
+.Markup classes
+Block
+
+.Syntax
+```
+toc: ?parameter_list ?title [:L:]"toc::" *( -[:L:\\] / "\\" -[] ) [:L:]
+```
+
+.Parameters
+```
+[#id[ref text].selector, for=sections, levels=3]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is title or none
+:.selector: multiple selectors are allowed
+:for: which content to generate the table for, default `sections`, also `figures`, `equations`, `examples`
+
+.Title
+Yes
+
+.Value
+The value is the text between the primary marker and the next unescaped line spacing.
+
+.Content
+None, generated
+
+.Semantics
+Replaced by a table of contents.  If the value exists it is converted to an ID using the algorithm [here]<<numb_sect_ref>> and the table of contents is only generated for that entity and its contents.
+
+Backends may elect to use their own facilities to generate tables of contents in which case any or all of the parameters may not be applicable, as described here.
+
+=== Unordered list item Entity
+
+Item in an unordered (bulleted) list.
+
+.Markup classes
+Block
+
+.Syntax
+```
+ordered_list: {0,2}parameter_list [:L:]*[:W:] +"*" [:W:]
+```
+
+.Parameters
+If there are two parameter lists the first one applies to the list entity and the second applies to the list item entity and a new list is forced, even if an existing list could have continued.  If there is only one parameter list it applies to the list item entity.
+
+List parameters:
+```
+[#id[ref text].selector]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is title or none
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in the content is allowed
+
+List item parameters:
+```
+[#id[ref text].selector&markup!markup; named_values]
+```
+
+:#id: one id is allowed
+:ref text: text to use in cross references, default is none
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in content is allowed
+:named_values: named values set for the scope of the contents
+
+.Title
+None
+
+.Value
+None
+
+.Content
+Content is the paragraph following the markup and block entities attached by a list continuation markup (see ...).  Lower level unordered lists nest within lists (any list type) with higher level without list continuation being needed.
+
+.Semantics
+By default renders as a bulleted list, differing levels use differing bullet schemes specified by the backends.
+
+== Implied Entities
+
+The entities in <<Entity Markups>> above are identified by markup, there are other entities which have no explicit markup and are implied and generated by the implementation.
+
+=== Header Entity
+
+The Header entity contains the document front matter, metadata, and document wide named values "document names".
+
+.Markup classes
+None
+
+.Syntax
+The header has no explicit syntax, it starts from the start of the file after any encoding markup.  The header ends at any content that is not allowed or at a Header End markup.
+
+.Parameters
+None
+
+.Title
+No
+
+.Content
+The following entities are allowed in a Header:
+
+* Title, 
+* Subtitle, 
+* Author,
+* Revision,
+* all block control markups except import,
+* no inline control markups.
+
+.Semantics
+The header is to collect information for the document itself, not its contents, including:
+
+* the document title
+* the document subtitle
+* authors
+* revision
+* define document names that are constant and persistent through the whole document
+* other metadata TBD
+
+==== Convenience markups
+
+The following convenience markups are accepted on the header to specify common named values in human friendly syntax.
+
+===== Title markup
+
+The title markup defines the `doctitle` named value.
+
+.Markup classes
+Block
+
+.Syntax
+```
+title: [:L:] "!=" [:W:] +(-[:L:\\] / "\\" [:L:]) &[:L:]
+```
+
+.Parameters
+None
+
+.Title
+No
+
+.Value
+The text value between the word spacing of the primary marker and the next unescaped line spacing (not inclusive) is the `doctitle` value.
+
+.Content
+None, the markup value sets the title.
+
+.Semantics
+The `doctitle` text may contain inline markup.
+
+===== Subtitle markup
+
+The subtitle markup defines the document `docsubtitle` named value.
+
+.Markup classes
+Block
+
+.Syntax
+```
+subtitle: [:L:] "!==" +(-[:L:\\] / "\\" [:L:]) &[:L:]
+```
+
+.Parameters
+None
+
+.Title
+No
+
+.Value
+The text value between the word spacing of the primary marker and the next unescaped line spacing (not inclusive) is the subtitle text.
+
+.Content
+None, the markup value sets the `docsubtitle` value.
+
+.Semantics
+The subtitle text may contain inline markup.
+
+===== Author Markup
+
+The author markup sets the author metadata values.  More than one is allowed.
+
+.Markup classes
+Block
+
+.Syntax
+```
+name_part: ?[#!]+(-[:S:\\] / "\\" -[:L:])
+author_email: "<" *(-[:L:">"\\] / "\\" -[:L:]) ">"
+author: [:L:]"!===" *[:W:] name_part *(*[:W:] name_part) *[:W:] ?email [:L:]
+```
+
+.Parameters
+None
+
+.Title
+None
+
+.Value
+The markup value consists of a whitespace separated list of `name_part`s and an optional `author_email`.  Word spacing within a name part must be escaped, eg `Johann Wolfgang von\\ Goethe`.  A leading exclamation (!) or hash(#) is not part of the name (see Semantics).
+
+.Content
+None
+
+.Semantics
+Multiple author name markups may be specified in the header.  Minimal assumptions are made about ordering of `name_part`s.  Named values are created from author, `author_n_m` (where `n` and `m` are numbers) is the `n`th author `m`th `name_part` in the order specified, and `author_n` is a value combining the author's `name_part`s in numerical order with one space separation.
+
+The name value `author_n_surname` has the value of the last `name_part` specified for the `n`th author unless any `name_part`(s) are prefixed with excalamation, then the value is those parts (in numeric order) combined with one space separation.
+
+The name value `author_n_forename` has the value of the first `name_part` specified unless any `name_part`(s) are prefixed with hash, then the value is those parts (in numeric order) combined with one space separation.
+
+Backends specify how they lay out author names using the named values and may allow further control over the ordering.
+
+===== Revision markup
+
+.Markup classes
+.Syntax
+.Parameters
+.Title
+.Value
+.Content
+.Semantics
+
+* Revision - the document revision, once only
+
+===== License markup
+
+The license markup provides license metadata and sets the `doclicense` and `licensedata` named values.
+
+.Markup classes
+Block
+
+.Syntax
+```
+license: [:L:] "!====" ?(":" +( -[\\:] / "\\" -[]) ) +(-[:L:\\] / "\\" [:L:]) &[:L:]
+```
+.Parameters
+None
+
+.Title
+None
+
+.Value
+The text between `:`s if present is a license name and sets `doclicense`, and the following text sets `licensedata` 
+
+.Content
+None
+
+.Semantics
+The `doclicense` name may be used by backends to interpret `licensedata` as formatted data to be added to the document metadata.
+
+Recognised `doclicense` values should be taken from the abbreviations in https://opensource.org/licenses/alphabetical and https://creativecommons.org/about/cclicenses/ or https://docs.github.com/en/github/creating-cloning-and-archiving-repositories/licensing-a-repository if the license falls within those lists. Which licenses a backend understands the `licensedata` for is backend defined.
+
+=== Prelude Entity
+
+The prelude entity collects document content that is located prior to the first structured sections of the document body.
+
+.Markup classes
+Block
+
+.Syntax
+The prelude does not have any explicit markup, it starts with the first markup after the header (which will be the first not allowed in the header, or the first after a Header End markup.  The prelude has no explicit end markup, it ends before the first markup not allowed in it, usually a section.
+
+.Parameters
+None
+
+.Title
+The prelude does not have a title, but paragraphs within it may.
+
+.Content
+The following entities are allowed in a prelude:
+
+* any delimited block class entity,
+* any list class entity,
+* Paragraph,
+* Table,
+* Table Cell, and
+* any generated content class entity.
+
+.Semantics
+The prelude contents is intended to occur in the document prior to the structured sections of the body.  It may be presented differently to similar content in the body.
+
+
+=== Body Entity
+
+.Markup classes
+Block
+
+.Syntax
+The body entity has no specific syntax
+.Parameters
+.Title
+.Content
+* Section,
+* any delimited block class entity,
+* any list class entity,
+* Paragraph,
+* Table,
+* Table Header Cell,
+* Table Cell, and
+* any generated content class entity.
+.Semantics
+
+=== Paragraph
+
+Sequences of text lines (see ...) between block markups are automatically combined into a Paragraph block entity, so there is no explicit paragraph markup.
+
+If there are no inline entities between two block markups no Paragraph is generated.
+
+A parameter list preceeding the first inline entity but separated from it by line spacing is applied to the Paragraph entity, not the inline entity.  This is consistent with all block markups that allow parameters, which require the parameter list to be on the preceeding line.  
+
+Similarly a title predeeding the first inline entity will apply to the Paragraph as inline entities do not allow titles.
+
+A pseudo syntax would be:
+
+```
+%block_markup
+?(paragraph_list [:L:])
+?(title [:L:])
++inline_entity
+```
+
+Paragraphs can be separated by the <<Paragraph Separator>> markup.
+
+.Parameters
+```
+[#id.selector&markup!markup]
+```
+
+:#id: one id is allowed
+:.selector: multiple selectors are allowed
+:&markup!markup: multiple additions and removals of markup from being parsed in content is allowed
+
+=== List
+
+A list consists of a contiguous sequence of the same list item entities with the same length of list item marker.
+
+There is no explicit list markup (except for a footnote list where items and content can be collected from previous footnote markups so an explicit list markup is needed), a list starts at the first list item markup that cannot be otherwise part of an existing list and ends when an entity that cannot be part of the list is encountered.  All items in the list must have the same length of primary marker.  A list item starting a new list with a greater length of marker nests the list inside the preceeding list item without needing an explicit continuation marker.
+
+Lists are:
+
+* Unordered list
+* Ordered list
+* Definition list
+* Quote list
+* Callout list
+* Footnote list - there is an implicit footnote list at the end of the document, other footnote lists are explicit
+* Table Header cell list
+
+Lists can be provided with parameter lists by providing the first list item with two parameter lists, the first will be assigned to the list and the second to the list item.
+
+Having two parameter lists also defines a list item as the first in a list and can therefore be used to separate lists that would otherwise run together, even if the parameter list for the list entity is empty, eg:
+
+====
+The following is two list items as indicated
+
+```
+* item 1 list 1
+* item 2 list 1
+[][]
+* item 1 list 2
+* item 2 list 2
+```
+====
+
+List items can be explicitly continued with the list continue markup, see ...
+
+=== Text lines
+
+Any sequence of inline markups and intervening text is automatically combined into a text line entity.  This retains line break position information for those entities and backends that need it.
+
+[#anames, appendix]
+= Automatically Generated Named Values
+
+These values are generated by the implementation and cannot be defined by the document, they are available throughout the document with the currently generated value.
+
+Document related names:
+
+|====
+| docfile  | the absolute pathname for the base document file
+| docdir   | the absolute pathname for the directory of the base document file
+| docfile  | current filename
+| docline  | current line
+| doctitle | the document title
+|====
+
+[appendix]
+= PEG notation
+
+Syntax in this document and in parts of the language is specified with a Parsing Expression Grammar (PEG).  This allows unification of character level such as definition of tokens, and grammar level constructs.
+
+== Terminals
+
+The markup uses the following code point classifications (which in some cases differ from Unicode classes of the same name).  The PEG character class name is shown at the end eg :S:
+
+spacing:: word spacing and line spacing :S:
+word spacing::: codepoints 0x20 (space), 0x09 (tab) (TODO Unicode stuff)... :W:
+line spacing::: cr lf crlf NEL LS PS start of file and end of file :L:
+punctuation:: ASCII punctuation only :P:
+alphabetic:: ASCII alphabetic a-z and A-Z :A:
+numeric:: ASCII numeric 0-9 :N:
+hex:: ASCII numeric and A-F and a-f :H:
+
+Terminals are code point specifications:
+
+* "abc" - sequence of code points a b c, escapes are:
+** "\c" - where c is a non lower case ASCII letter code point, remove any meaning eg "\"" to include quotes and "\\" to include backslash.  If c is a lower case ASCII letter meanings are similar to C string escapes:
+*** n - newline
+*** TODO more escapes
+*** u - followed by up to 6 hex digits the specified Unicode code point, if the next code point is a valid hex then leading zeros to pad to 6 digits are needed
+*** x - followed by two hex digits the specified Unicode code point
+* [abc] - one of a or b or c, same escapes as sequence, range a-z includes all code points between a and z, dash at the ends of the sequence is the code point, `:` uppercase ASCII `:` is the list of code points in the character class listed above, a single colon is the colon code point
+* -[abc] - any code point except those listed, same ranges and escapes as above, `-[]` matches any code point, equivalent of `.` in some other PEGs, or regexes. 
+
+== Non-Terminals
+
+Non-terminals are defined by `name: expression ;`
+
+Note unlike regexes and some other PEG notations all unary operators are prefix because English does not postfix verbs use and this document is in English.  Other than inside terminals, whitespace in an expression is immaterial.
+
+In the following list `E`, `E1`, and `E2` are terminals, defined non-terminals, or expressions.
+
+* `(E)` - grouping to treat `E` as a single expression
+* `E1 E2` - sequence of code points matching `E1` then `E2`
+* `E1 / E2` - sequence of code points matching `E1` or if not then matching `E2` (ordered alternative)
+* `?E` - optional code point sequence matching `E`
+* `*E` - zero or more code point sequences each matching `E`
+* `+E` - one or more code point sequences each matching `E`
+* `{n,m}E` - at least `n` but at most `m` code point sequences matching `E`, if `,m` is omitted exactly `n`, or if `m` only is omitted all matches (ie m = infinity)
+* `!E` - not followed by `E`, non-consuming lookahead
+* `&E` - followed by `E`, non-consuming lookahead
+* `#E` - not preceeded by `E`, non-consuming look behind
+* `%E` - preceeded by `E`, non-consuming look behind 
+
+Grouping `()` has priority over unary operators `?*+{}` which have priority over sequence which has priority over alternate.
+
+[NOTE]
+----
+The `?`, `*`, and `+` operators are equivalent to `{0,1}`, `{0,}`, and `{1,}` respectively
+
+= Future
+
+SVG and other diagrams
